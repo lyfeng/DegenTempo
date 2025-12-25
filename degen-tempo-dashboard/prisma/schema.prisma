@@ -1,0 +1,49 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // Use postgresql for both local development and production
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            Int      @id @default(autoincrement())
+  fid           String   @unique
+  walletAddress String?  @map("wallet_address")
+  stripeAccountId String? @map("stripe_account_id")
+  dailyGasLimit Decimal  @default(0) // Daily gas limit in USD or native token
+  usedGasToday  Decimal  @default(0) // Gas used today
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  transactions  Transaction[]
+  
+  @@map("users")
+}
+
+model Transaction {
+  id        Int      @id @default(autoincrement())
+  bizId     String   @unique // UUID
+  userId    Int
+  
+  // Business Data
+  inputAmount   Decimal
+  feeAmount     Decimal
+  outputAmount  Decimal // USDC
+  
+  // Chain Data
+  lifiTxId      String?  @unique
+  baseTxHash    String?
+  tempoTxHash   String?
+  
+  status        String   // PENDING, COMPLETED, FAILED
+  
+  user          User     @relation(fields: [userId], references: [id])
+  createdAt     DateTime @default(now())
+  
+  @@map("transactions")
+}
