@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { RefreshCw, LayoutDashboard, History, Settings, Wallet, ArrowRight, Menu, X, LogIn, Copy, LogOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -9,9 +9,29 @@ import { usePrivy, useWallets } from "@privy-io/react-auth"
 import { useSmartAccount } from "@/hooks/use-smart-account"
 import { loginUser, getUserStats, submitTrade, getTradeHistory, connectStripe, createPayout } from "@/lib/api"
 import { toast } from "sonner"
-import { getLifiQuote, type LifiQuote } from "@/lib/lifi"
-import { encodeFunctionData, parseUnits, formatUnits, erc20Abi, createWalletClient, custom, maxUint256, getAddress } from "viem"
-import { DEGEN_TOKEN_ADDRESS, USDC_ADDRESS, USDC_ON_TEMPO_ADDRESS, chain, publicClient, APP_TOKEN } from "@/lib/viem"
+import { getAcrossQuote, spokePoolAbi } from "@/lib/across"
+import { encodeFunctionData, parseUnits, formatUnits, erc20Abi, getAddress, createWalletClient, custom } from "viem"
+
+// Extended ERC20 ABI to include Permit
+const erc20PermitAbi = [
+    ...erc20Abi,
+    {
+        "inputs": [
+            { "internalType": "address", "name": "owner", "type": "address" },
+            { "internalType": "address", "name": "spender", "type": "address" },
+            { "internalType": "uint256", "name": "value", "type": "uint256" },
+            { "internalType": "uint256", "name": "deadline", "type": "uint256" },
+            { "internalType": "uint8", "name": "v", "type": "uint8" },
+            { "internalType": "bytes32", "name": "r", "type": "bytes32" },
+            { "internalType": "bytes32", "name": "s", "type": "bytes32" }
+        ],
+        "name": "permit",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+] as const;
+import { DESTINATION_TOKEN_ADDRESS, DESTINATION_CHAIN, chain, publicClient, APP_TOKEN } from "@/lib/viem"
 import { degenTokenAbi } from "@/lib/abi/DegenToken"
 import { getPermitSignature } from "@/lib/permit"
 
@@ -22,19 +42,22 @@ export default function DegenTempoDashboard() {
   
   const [activeTab, setActiveTab] = useState("dashboard")
   const [amount, setAmount] = useState("")
-  const [quote, setQuote] = useState<LifiQuote | null>(null)
+  const [quote, setQuote] = useState<any | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [stats, setStats] = useState<any>(null)
   const [transactions, setTransactions] = useState<any[]>([])
   const [loadingQuote, setLoadingQuote] = useState(false)
   const [signerBalance, setSignerBalance] = useState("0")
   const [usdcBalance, setUsdcBalance] = useState("0")
+  const [isApproving, setIsApproving] = useState(false)
+  const [needsApproval, setNeedsApproval] = useState(false)
   const [isSwapping, setIsSwapping] = useState(false)
 
   const [activeWallet, setActiveWallet] = useState<{address: string, type: string} | null>(null);
 
   // Determine Active Wallet for Transactions
   useEffect(() => {
+
     if (!wallets || wallets.length === 0) return;
 
     // 1. Try to find the embedded wallet (Priority for Smart Account Owner)
@@ -44,7 +67,8 @@ export default function DegenTempoDashboard() {
     const primary = wallets.find(w => w.address.toLowerCase() === user?.wallet?.address?.toLowerCase());
     
     // 3. Fallback to first available
-    const target = embedded || primary || wallets[0];
+    // Prioritize primary (connected) wallet, then embedded, then any
+    const target = primary || embedded || wallets[0];
 
     if (target) {
         setActiveWallet({
@@ -66,7 +90,7 @@ export default function DegenTempoDashboard() {
                 console.error("Login failed:", res.error);
                 return;
             }
-            console.log("Login success:", res);
+                console.log("Login success:", res);
             fetchStats();
             fetchHistory();
         });
@@ -78,7 +102,7 @@ export default function DegenTempoDashboard() {
     toast.success("Address copied to clipboard");
   };
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     if (!user?.id) return;
     setIsRefreshing(true);
     try {
@@ -117,29 +141,33 @@ export default function DegenTempoDashboard() {
                         address: activeWallet.address as `0x${string}` 
                     });
                 } else {
+                     console.log("Reading contract:", APP_TOKEN.address, "for", activeWallet.address);
                      balance = await publicClient.readContract({
                         address: getAddress(APP_TOKEN.address),
                         abi: erc20Abi,
                         functionName: 'balanceOf',
                         args: [getAddress(activeWallet.address)]
                     });
+                    console.log("Raw Balance:", balance);
                 }
                 setSignerBalance(formatUnits(balance, APP_TOKEN.decimals));
             } catch (err) {
                 console.error("Error fetching signer balance:", err);
             }
+        } else {
+             console.log("No active wallet to fetch balance for");
         }
         
         // Fetch USDC Balance
-        if (smartAccountAddress && USDC_ADDRESS) {
+        if (smartAccountAddress && APP_TOKEN.address) {
              try {
                 const balance = await publicClient.readContract({
-                    address: getAddress(USDC_ADDRESS),
+                    address: getAddress(APP_TOKEN.address),
                     abi: erc20Abi,
                     functionName: 'balanceOf',
                     args: [getAddress(smartAccountAddress)]
                 });
-                setUsdcBalance(formatUnits(balance, 6)); // USDC usually 6 decimals
+                setUsdcBalance(formatUnits(balance, APP_TOKEN.decimals)); 
              } catch (err) {
                  console.error("Error fetching USDC balance:", err);
              }
@@ -147,11 +175,16 @@ export default function DegenTempoDashboard() {
 
         setStats({ ...data, balance: tokenBalance });
     } catch (e) {
-        toast.error("Failed to fetch stats");
+        console.error("Fetch stats error:", e);
+        // toast.error("Failed to fetch stats");
     } finally {
         setIsRefreshing(false);
     }
-  };
+  }, [user?.id, smartAccountAddress, activeWallet]);
+
+  useEffect(() => {
+      fetchStats();
+  }, [fetchStats]);
 
   const fetchHistory = async () => {
       if (!user?.id) return;
@@ -189,8 +222,8 @@ export default function DegenTempoDashboard() {
   };
 
   const handleWithdraw = async () => {
-     if (!smartAccountAddress || !amount || !smartAccountClient) {
-        toast.error("Smart Account not ready or Amount missing");
+     if (!amount) {
+        toast.error("Amount missing");
         return;
     }
     
@@ -208,31 +241,105 @@ export default function DegenTempoDashboard() {
              throw new Error("Treasury address not configured");
          }
 
-         toast.info(`Sending funds to Treasury (${TREASURY_ADDRESS.slice(0,6)}...)...`);
-         
-         // 1. Send Funds to Treasury
+         toast.info(`Preparing withdrawal...`);
+
+         // Determine Funding Source
          let txHash;
-         if (APP_TOKEN.isNative) {
-             txHash = await smartAccountClient.sendTransaction({
-                 to: TREASURY_ADDRESS as `0x${string}`,
-                 value: amountBN,
-                 data: "0x"
+         let usedSource = "";
+
+         // 1. Check Smart Account Balance
+         let smartAccountBal = BigInt(0);
+         if (smartAccountAddress) {
+            try {
+                smartAccountBal = await publicClient.readContract({
+                    address: getAddress(APP_TOKEN.address),
+                    abi: erc20Abi,
+                    functionName: 'balanceOf',
+                    args: [getAddress(smartAccountAddress)]
+                });
+            } catch (e) {}
+         }
+
+         // 2. Check EOA Balance
+         let eoaBal = BigInt(0);
+         if (activeWallet?.address) {
+             try {
+                eoaBal = await publicClient.readContract({
+                    address: getAddress(APP_TOKEN.address),
+                    abi: erc20Abi,
+                    functionName: 'balanceOf',
+                    args: [getAddress(activeWallet.address)]
+                });
+             } catch (e) {}
+         }
+
+         console.log(`Withdraw Check - Smart Account: ${formatUnits(smartAccountBal, APP_TOKEN.decimals)}, EOA: ${formatUnits(eoaBal, APP_TOKEN.decimals)}, Needed: ${amount}`);
+
+         // 3. Execute Transaction
+         if (smartAccountAddress && smartAccountBal >= amountBN && smartAccountClient) {
+             // Use Smart Account
+             usedSource = "Smart Account";
+             toast.info(`Sending funds from Smart Account...`);
+             
+             if (APP_TOKEN.isNative) {
+                 txHash = await smartAccountClient.sendTransaction({
+                     to: TREASURY_ADDRESS as `0x${string}`,
+                     value: amountBN,
+                     data: "0x"
+                 });
+             } else {
+                 txHash = await smartAccountClient.sendTransaction({
+                     to: APP_TOKEN.address as `0x${string}`,
+                     data: encodeFunctionData({
+                         abi: erc20Abi,
+                         functionName: "transfer",
+                         args: [TREASURY_ADDRESS as `0x${string}`, amountBN]
+                     }),
+                     value: BigInt(0)
+                 });
+             }
+         } else if (activeWallet && eoaBal >= amountBN) {
+             // Use EOA (Wallet)
+             usedSource = "Wallet";
+             toast.info(`Sending funds from Wallet (${activeWallet.address.slice(0,6)}...)...`);
+
+             const wallet = wallets.find(w => w.address.toLowerCase() === activeWallet.address.toLowerCase());
+             if (!wallet) throw new Error("Wallet provider not found");
+
+             const provider = await wallet.getEthereumProvider();
+             const walletClient = createWalletClient({
+                account: activeWallet.address as `0x${string}`,
+                chain: chain,
+                transport: custom(provider)
              });
+
+             if (APP_TOKEN.isNative) {
+                 txHash = await walletClient.sendTransaction({
+                     to: TREASURY_ADDRESS as `0x${string}`,
+                     value: amountBN,
+                     chain: chain
+                 });
+             } else {
+                 txHash = await walletClient.writeContract({
+                    address: getAddress(APP_TOKEN.address),
+                    abi: erc20Abi,
+                    functionName: 'transfer',
+                    args: [TREASURY_ADDRESS as `0x${string}`, amountBN],
+                    chain: chain
+                 });
+             }
          } else {
-             txHash = await smartAccountClient.sendTransaction({
-                 to: APP_TOKEN.address as `0x${string}`,
-                 data: encodeFunctionData({
-                     abi: erc20Abi,
-                     functionName: "transfer",
-                     args: [TREASURY_ADDRESS as `0x${string}`, amountBN]
-                 }),
-                 value: BigInt(0)
-             });
+             throw new Error(`Insufficient balance. Needed: ${amount}, Available: SA=${formatUnits(smartAccountBal, APP_TOKEN.decimals)}, EOA=${formatUnits(eoaBal, APP_TOKEN.decimals)}`);
          }
          
-         toast.success("Funds sent! Processing Payout...");
+         toast.info(`Transaction submitted (${txHash.slice(0,6)}...). Waiting for confirmation...`);
 
-         // 2. Trigger Backend Payout
+         // Wait for transaction to be mined
+         await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
+
+         toast.success(`Funds sent from ${usedSource}! Processing Payout...`);
+
+         // 4. Trigger Backend Payout
          const payoutRes = await createPayout(user?.id || "", amount, txHash);
          
          if (!payoutRes.success) {
@@ -252,208 +359,323 @@ export default function DegenTempoDashboard() {
     setLoadingQuote(true);
     setQuote(null);
     try {
-        if (!process.env.NEXT_PUBLIC_TEMPO_CHAIN_ID) {
-            throw new Error("Configuration Error: NEXT_PUBLIC_TEMPO_CHAIN_ID is not set. Please configure the target Tempo Chain ID.");
-        }
-        const targetChainId = parseInt(process.env.NEXT_PUBLIC_TEMPO_CHAIN_ID);
-            
-        if (targetChainId === chain.id) {
-            console.warn("Target chain is same as source chain. Ensure this is intended.");
-        }
+        const targetChainId = DESTINATION_CHAIN.id;
+        const targetTokenAddress = DESTINATION_TOKEN_ADDRESS;
+        
+        // Use Active Wallet (EOA) if available, otherwise Smart Account
+        const quoteUserAddress = activeWallet?.address || smartAccountAddress || user?.wallet?.address;
 
-        const targetTokenAddress = targetChainId === chain.id ? USDC_ADDRESS : USDC_ON_TEMPO_ADDRESS;
-        const treasuryAddress = process.env.NEXT_PUBLIC_TREASURY_ADDRESS;
+        // Log params for debugging
+        console.log("--- Quote Request Debug Info ---");
+        console.log("1. Connected Wallet (EOA):", activeWallet?.address);
+        console.log("2. Smart Account (Derived):", smartAccountAddress);
+        console.log("3. Address sent to Across API:", quoteUserAddress);
+        console.log("--------------------------------");
 
-        const quoteData = await getLifiQuote(
+        const quoteData = await getAcrossQuote(
             chain.id, 
             targetChainId, 
             APP_TOKEN.address, 
-            targetTokenAddress, 
+            targetTokenAddress, // Pass explicit target token
             parseUnits(amount, APP_TOKEN.decimals).toString(), 
-            smartAccountAddress || user.wallet?.address || "",
-            smartAccountAddress || user.wallet?.address || "" // Send funds to User's Wallet on Destination Chain
+            quoteUserAddress as string,
+            quoteUserAddress as string // recipient
         );
+        console.log("Across Quote Result:", quoteData);
         setQuote(quoteData);
-    } catch (e) {
+
+        // Check Allowance for EOA
+        if (activeWallet?.address && quoteData?.spokePoolAddress) {
+             try {
+                let spender = quoteData.spokePoolAddress;
+                // Double check if object
+                if (typeof spender === 'object' && spender !== null) {
+                     // @ts-ignore
+                     spender = spender.address || spender.contractAddress;
+                }
+
+                if (typeof spender === 'string' && spender.startsWith('0x')) {
+                    const allowance = await publicClient.readContract({
+                        address: getAddress(APP_TOKEN.address),
+                        abi: erc20Abi,
+                        functionName: 'allowance',
+                        args: [getAddress(activeWallet.address), getAddress(spender)]
+                    });
+                    
+                    const amountBN = parseUnits(amount, APP_TOKEN.decimals);
+                    console.log(`Checking allowance for ${activeWallet.address} -> ${spender}: ${allowance.toString()} (Needed: ${amountBN.toString()})`);
+                    
+                    if (allowance < amountBN) {
+                        setNeedsApproval(true);
+                    } else {
+                        setNeedsApproval(false);
+                    }
+                }
+             } catch (err) {
+                 console.error("Error checking allowance:", err);
+             }
+        }
+    } catch (e: any) {
         console.error(e);
-        toast.error("Failed to get quote");
+        toast.error("Failed to get quote: " + (e.message || "Unknown error"));
     } finally {
         setLoadingQuote(false);
     }
   };
 
-  const handleConvert = async () => {
-    if (!quote || !user?.id || !smartAccountClient || !smartAccountAddress) {
-        toast.error("Smart Account not ready");
-        return;
+  const handleApprove = async () => {
+    if (!activeWallet || !quote) return;
+    setIsApproving(true);
+    try {
+        let approvalHash;
+
+        // 1. Use Across provided approval transaction if available
+        if (quote.approvalTxns?.[0]) {
+            const approvalTx = quote.approvalTxns[0];
+            toast.info("Please sign the approval transaction in your wallet...");
+            
+            // Find wallet object to get provider
+            const wallet = wallets.find(w => w.address.toLowerCase() === activeWallet.address.toLowerCase());
+            if (!wallet) throw new Error("Wallet provider not found");
+
+            const provider = await wallet.getEthereumProvider();
+            const walletClient = createWalletClient({
+                account: activeWallet.address as `0x${string}`,
+                chain: chain,
+                transport: custom(provider)
+            });
+
+            approvalHash = await walletClient.sendTransaction({
+                to: approvalTx.to as `0x${string}`,
+                data: approvalTx.data as `0x${string}`,
+                value: BigInt(0),
+                chain: chain
+            });
+        } else {
+             // 2. Fallback to manual ERC20 Approve
+             console.log("Manual Approval Flow initiated");
+             
+             let spender = quote.spokePoolAddress;
+             if (typeof spender === 'object' && spender !== null) {
+                  // @ts-ignore
+                  spender = spender.address || spender.contractAddress;
+             }
+             
+             // Fallback logic similar to handleConvert
+             if (!spender || typeof spender !== 'string' || !spender.startsWith('0x')) {
+                 throw new Error("Invalid SpokePool Address for approval");
+             }
+
+             toast.info(`Approving USDC for ${spender.slice(0,6)}...`);
+             
+             const wallet = wallets.find(w => w.address.toLowerCase() === activeWallet.address.toLowerCase());
+             if (!wallet) throw new Error("Wallet provider not found");
+
+             const provider = await wallet.getEthereumProvider();
+             const walletClient = createWalletClient({
+                account: activeWallet.address as `0x${string}`,
+                chain: chain,
+                transport: custom(provider)
+             });
+             
+             // Approve Amount (or slightly more to avoid precision issues)
+             const amountBN = parseUnits(amount, APP_TOKEN.decimals);
+             
+             approvalHash = await walletClient.writeContract({
+                address: getAddress(APP_TOKEN.address),
+                abi: erc20Abi,
+                functionName: 'approve',
+                args: [getAddress(spender), amountBN],
+                chain: chain
+             });
+        }
+
+        toast.info("Approval submitted. Waiting for confirmation...");
+        
+        if (approvalHash) {
+            await publicClient.waitForTransactionReceipt({ hash: approvalHash });
+            toast.success("Approval successful! Refreshing quote...");
+        }
+
+        // Small delay to allow chains to sync
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Refresh quote to update allowance status
+        await handleGetQuote();
+
+    } catch (e: any) {
+        console.error("Approval failed:", e);
+        toast.error("Approval failed: " + e.message);
+    } finally {
+        setIsApproving(false);
     }
-    
+  };
+
+  const handleConvert = async () => {
+    if (!quote || !user?.id) return;
     setIsSwapping(true);
     toast.info("Initiating Swap...");
 
     try {
         const amountBN = parseUnits(amount, APP_TOKEN.decimals);
+        // Destructure quote and allow re-assignment for fixes
+        let { spokePoolAddress, outputAmount, exclusiveRelayer, timestamp, fillDeadline, exclusivityDeadline, message, outputToken, destinationChainId } = quote;
+
+        // Fix: Ensure spokePoolAddress is a string (SDK v3 might return object)
+        if (typeof spokePoolAddress === 'object' && spokePoolAddress !== null) {
+            console.warn("DEBUG: spokePoolAddress is object, fixing...", spokePoolAddress);
+            // @ts-ignore
+            spokePoolAddress = spokePoolAddress.address || spokePoolAddress.contractAddress;
+        }
+
+        // Fallback for SpokePool Address if invalid
+        if (!spokePoolAddress || typeof spokePoolAddress !== 'string' || !spokePoolAddress.startsWith('0x')) {
+             throw new Error(`Invalid SpokePool Address: ${spokePoolAddress}`);
+        }
+
+        // Fix outputToken if object
+        if (typeof outputToken === 'object' && outputToken !== null) {
+             // @ts-ignore
+             outputToken = outputToken.address || outputToken.tokenAddress;
+        }
         
-        // 1. Identify Signer Wallet (Must match Active Wallet)
+        // Fix exclusiveRelayer if object
+        if (typeof exclusiveRelayer === 'object' && exclusiveRelayer !== null) {
+             // @ts-ignore
+             exclusiveRelayer = exclusiveRelayer.address || exclusiveRelayer.relayerAddress;
+        }
+
+        // Normalize exclusiveRelayer
+        const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+        if (!exclusiveRelayer || exclusiveRelayer.toLowerCase() === ZERO_ADDRESS) {
+            exclusiveRelayer = ZERO_ADDRESS;
+        }
+
+        // Prepare Safe Numbers for Contract Call
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const safeTimestamp = Number(timestamp) || currentTimestamp;
+        const safeFillDeadline = Number(fillDeadline) || (safeTimestamp + 21600); // Default 6 hours
+        
+        // Fix: If exclusiveRelayer is zero address, exclusivityDeadline MUST be <= quoteTimestamp
+        // We set it to 0 to be absolutely safe (0 <= any valid timestamp).
+        // This indicates no exclusivity period.
+        let safeExclusivityDeadline = Number(exclusivityDeadline);
+        
+        if (exclusiveRelayer === ZERO_ADDRESS) {
+            safeExclusivityDeadline = 0; 
+        } else {
+            // Exclusive relayer set -> Ensure valid deadline
+            safeExclusivityDeadline = safeExclusivityDeadline || (safeTimestamp + 7200); // Default 2 hours
+        }
+        
+        const safeDestinationChainId = BigInt(destinationChainId || 0);
+
+        console.log("DEBUG: Contract Args:", {
+            outputAmount: outputAmount || 0,
+            destinationChainId: safeDestinationChainId,
+            timestamp: safeTimestamp,
+            fillDeadline: safeFillDeadline,
+            exclusivityDeadline: safeExclusivityDeadline,
+            exclusiveRelayer: exclusiveRelayer
+        });
+
+        // EOA Direct Flow (Standard)
+        if (activeWallet) {
+            
+            // 1. Identify Signer Wallet (Must match Active Wallet)
+            const signerWallet = wallets.find((w) => w.address.toLowerCase() === activeWallet.address.toLowerCase());
+            
+            if (!signerWallet) {
+                 // Should not happen if activeWallet is set
+                 throw new Error(`Wallet instance not found for address: ${activeWallet.address}`);
+            }
+
+            const provider = await signerWallet.getEthereumProvider();
+            const walletClient = createWalletClient({
+                account: signerWallet.address as `0x${string}`,
+                chain: chain,
+                transport: custom(provider)
+            });
+
+            // 2. Check Balance
+            if (APP_TOKEN.isNative) {
+                // ... native logic if needed ...
+            } else {
+                 const eoaBalance = await publicClient.readContract({
+                    address: getAddress(APP_TOKEN.address),
+                    abi: erc20Abi,
+                    functionName: 'balanceOf',
+                    args: [getAddress(signerWallet.address)]
+                });
+
+                if (eoaBalance < amountBN) {
+                    toast.error(`Insufficient balance in your wallet. Needed: ${amount}`);
+                    setIsSwapping(false);
+                    return;
+                }
+            }
+
+            toast.info("Please sign the transaction in your wallet...");
+
+            console.log("DEBUG: Preparing writeContract...");
+            console.log("DEBUG: spokePoolAddress:", spokePoolAddress, typeof spokePoolAddress);
+            console.log("DEBUG: activeWallet.address:", activeWallet.address, typeof activeWallet.address);
+            console.log("DEBUG: APP_TOKEN.address:", APP_TOKEN.address, typeof APP_TOKEN.address);
+            console.log("DEBUG: outputToken:", outputToken, typeof outputToken);
+            console.log("DEBUG: exclusiveRelayer:", exclusiveRelayer, typeof exclusiveRelayer);
+            console.log("DEBUG: message:", message, typeof message);
+
+            const txHash = await walletClient.writeContract({
+                address: spokePoolAddress as `0x${string}`,
+                abi: spokePoolAbi,
+                functionName: 'depositV3',
+                args: [
+                    activeWallet.address as `0x${string}`, // depositor
+                    activeWallet.address as `0x${string}`, // recipient
+                    APP_TOKEN.address as `0x${string}`, // inputToken
+                    (outputToken || "0x0000000000000000000000000000000000000000") as `0x${string}`, // outputToken
+                    amountBN, // inputAmount
+                    BigInt(outputAmount || 0), // outputAmount
+                    safeDestinationChainId, // destinationChainId
+                    exclusiveRelayer as `0x${string}`,
+                    safeTimestamp, // quoteTimestamp
+                    safeFillDeadline, // fillDeadline
+                    safeExclusivityDeadline, // exclusivityDeadline
+                    (message || "0x") as `0x${string}` // message
+                ],
+                chain: chain,
+                value: BigInt(0) // USDC is not native token
+            });
+
+            console.log("Transaction submitted:", txHash);
+
+            // 6. Record Trade
+            await submitTrade(user.id, amount, txHash, formatUnits(BigInt(outputAmount), 6));
+
+            toast.success("Transaction Submitted! Funds are on the way.", {
+                action: {
+                    label: "View Explorer",
+                    onClick: () => window.open(`${chain.blockExplorers?.default.url}/tx/${txHash}`, '_blank')
+                }
+            });
+            setQuote(null);
+            setAmount("");
+            fetchHistory();
+            
+            // Delay fetch stats to allow RPC to index
+            setTimeout(() => {
+                fetchStats();
+            }, 2000);
+            return;
+        }
+
+        // Fallback if no active wallet found
         if (!activeWallet) {
-            toast.error("No active wallet found. Please reconnect.");
-            setIsSwapping(false);
-            return;
+             toast.error("No active wallet found. Please reconnect.");
+             setIsSwapping(false);
+             return;
         }
 
-        const signerWallet = wallets.find((w) => w.address.toLowerCase() === activeWallet.address.toLowerCase());
-        
-        if (!signerWallet) {
-            throw new Error(`Wallet instance not found for address: ${activeWallet.address}`);
-        }
-
-        console.log("Using Signer Wallet:", { 
-            type: signerWallet.walletClientType, 
-            address: signerWallet.address,
-            activeType: activeWallet.type 
-        });
-
-        // 2. Check EOA Balance (Not Smart Account Balance!)
-        // We are pulling funds FROM the EOA.
-        const provider = await signerWallet.getEthereumProvider();
-        const walletClient = createWalletClient({
-            account: signerWallet.address as `0x${string}`,
-            chain: chain,
-            transport: custom(provider)
-        });
-
-        if (APP_TOKEN.isNative) {
-            throw new Error("Permit flow is not supported for Native ETH. Please use ERC20 token.");
-        }
-
-        const eoaBalance = await publicClient.readContract({
-            address: getAddress(APP_TOKEN.address),
-            abi: degenTokenAbi,
-            functionName: 'balanceOf',
-            args: [getAddress(signerWallet.address)]
-        });
-
-        if (eoaBalance < amountBN) {
-            toast.error(`Insufficient balance in your wallet. Needed: ${amount}`);
-            setIsSwapping(false);
-            return;
-        }
-
-        toast.info("Step 1/2: Please sign the Permit request...");
-
-        // 3. Generate Permit Signature (Gasless)
-        // This allows the Smart Account to pull funds from EOA
-        const permit = await getPermitSignature(
-            walletClient,
-            publicClient,
-            APP_TOKEN.address as `0x${string}`,
-            signerWallet.address as `0x${string}`, // Owner (EOA)
-            smartAccountAddress as `0x${string}`,    // Spender (Smart Account)
-            amountBN
-        );
-
-        toast.info(`Step 2/2: Executing Transaction...`);
-
-        // 4. Construct Batch UserOperation
-        // Batch = [Permit, TransferFrom, ApproveRouter, Swap]
-        
-        const step = quote.steps[0];
-        if (!step.transactionRequest) {
-             throw new Error("Invalid quote: missing transaction request");
-        }
-        const { to: routerAddress, data: swapData, value: swapValue } = step.transactionRequest;
-
-        const batchCalls = [
-            // Call 1: Permit (Token Contract)
-            {
-                to: APP_TOKEN.address as `0x${string}`,
-                data: encodeFunctionData({
-                    abi: degenTokenAbi,
-                    functionName: 'permit',
-                    args: [
-                        signerWallet.address as `0x${string}`,
-                        smartAccountAddress as `0x${string}`,
-                        amountBN,
-                        permit.deadline,
-                        permit.v,
-                        permit.r,
-                        permit.s
-                    ]
-                }),
-                value: BigInt(0)
-            },
-            // Call 2: TransferFrom EOA -> Smart Account
-            {
-                to: APP_TOKEN.address as `0x${string}`,
-                data: encodeFunctionData({
-                    abi: degenTokenAbi,
-                    functionName: 'transferFrom',
-                    args: [
-                        signerWallet.address as `0x${string}`,
-                        smartAccountAddress as `0x${string}`,
-                        amountBN
-                    ]
-                }),
-                value: BigInt(0)
-            },
-            // Call 3: Approve Router (Smart Account -> LI.FI Router)
-            {
-                to: APP_TOKEN.address as `0x${string}`,
-                data: encodeFunctionData({
-                    abi: degenTokenAbi,
-                    functionName: 'approve',
-                    args: [routerAddress as `0x${string}`, amountBN]
-                }),
-                value: BigInt(0)
-            },
-            // Call 4: Execute Swap (LI.FI Router)
-            {
-                to: routerAddress as `0x${string}`,
-                data: swapData as `0x${string}`,
-                value: BigInt(swapValue || 0)
-            }
-        ];
-
-        // 5. Send UserOperation
-        // @ts-ignore
-        // For batch transactions, we must use sendUserOperation directly or use a method that supports 'calls'
-        // Since sendTransaction (singular) only supports one call, we use sendUserOperation which uses the account to encode calls.
-        
-        const userOpHash = await smartAccountClient.sendUserOperation({
-            calls: batchCalls
-        });
-        
-        console.log("UserOp submitted:", userOpHash);
-        
-        const receipt = await smartAccountClient.waitForUserOperationReceipt({ hash: userOpHash });
-        
-        if (!receipt.success) {
-            console.error("UserOp Receipt Failed:", receipt);
-            throw new Error("Transaction Execution Reverted on chain. Please check block explorer for details.");
-        }
-
-        const txHash = receipt.receipt.transactionHash;
-
-        console.log("Transaction submitted:", txHash);
-
-        
-        // 6. Record Trade
-        await submitTrade(user.id, amount, txHash, formatUnits(BigInt(step.estimate.toAmount), 6));
-
-        toast.success("Transaction Submitted! Funds are on the way.", {
-            action: {
-                label: "View Explorer",
-                onClick: () => window.open(`https://sepolia.basescan.org/tx/${txHash}`, '_blank')
-            }
-        });
-        setQuote(null);
-        setAmount("");
-        fetchHistory();
-        
-        // Delay fetch stats to allow RPC to index
-        setTimeout(() => {
-            fetchStats();
-        }, 2000);
 
     } catch (e: any) {
         console.error("Swap failed:", e);
@@ -481,9 +703,21 @@ export default function DegenTempoDashboard() {
                       <CardTitle>Welcome</CardTitle>
                       <CardDescription>Sign in to manage your Degen assets</CardDescription>
                   </CardHeader>
-                  <CardContent>
-                      <Button className="w-full bg-blue-600 hover:bg-blue-700" onClick={login}>
-                          <LogIn className="mr-2 h-4 w-4" /> Login with Farcaster
+                  <CardContent className="space-y-3">
+                      <Button className="w-full bg-purple-600 hover:bg-purple-700" onClick={() => login({ loginMethods: ['farcaster'] })}>
+                          <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Farcaster_logo_transparent.png/240px-Farcaster_logo_transparent.png" alt="Farcaster" className="mr-2 h-4 w-4 invert brightness-0 saturate-100" /> 
+                          Login with Farcaster
+                      </Button>
+                      <div className="relative">
+                        <div className="absolute inset-0 flex items-center">
+                          <span className="w-full border-t border-slate-800" />
+                        </div>
+                        <div className="relative flex justify-center text-xs uppercase">
+                          <span className="bg-slate-950 px-2 text-slate-500">Or</span>
+                        </div>
+                      </div>
+                      <Button variant="outline" className="w-full border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white" onClick={() => login({ loginMethods: ['wallet'] })}>
+                          <Wallet className="mr-2 h-4 w-4" /> Connect Wallet (MetaMask)
                       </Button>
                   </CardContent>
               </Card>
@@ -538,15 +772,21 @@ export default function DegenTempoDashboard() {
                 />
              ) : (
                 <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-purple-500 to-blue-500 text-sm font-bold text-white">
-                  {user?.farcaster?.displayName?.charAt(0) || "U"}
+                  {user?.farcaster?.displayName?.charAt(0) || user?.wallet?.address?.slice(0, 2) || "U"}
                 </div>
              )}
              <div className="overflow-hidden">
                <p className="truncate text-sm font-medium text-white flex items-center gap-1">
-                 {user?.farcaster?.displayName || "User"}
-                 <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Farcaster_logo_transparent.png/240px-Farcaster_logo_transparent.png" alt="Farcaster" className="h-3 w-3 inline-block opacity-80" />
+                 {user?.farcaster?.displayName || "Wallet User"}
+                 {user?.farcaster ? (
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Farcaster_logo_transparent.png/240px-Farcaster_logo_transparent.png" alt="Farcaster" className="h-3 w-3 inline-block opacity-80" />
+                 ) : (
+                    <Wallet className="h-3 w-3 inline-block opacity-80 text-slate-400" />
+                 )}
                </p>
-               <p className="truncate text-xs text-slate-500">@{user?.farcaster?.username || user?.wallet?.address?.slice(0, 6)}</p>
+               <p className="truncate text-xs text-slate-500">
+                   {user?.farcaster?.username ? `@${user.farcaster.username}` : (user?.wallet?.address ? `${user.wallet.address.slice(0, 6)}...${user.wallet.address.slice(-4)}` : "")}
+               </p>
              </div>
            </div>
          </div>
@@ -579,12 +819,12 @@ export default function DegenTempoDashboard() {
             )}
 
             {/* Testnet Adapter Indicator */}
-            {chain.testnet && (
+                    {chain.testnet && (
                  <div className="mb-6 rounded-lg border border-blue-500/20 bg-blue-500/10 p-4 text-sm text-blue-200">
                     <p className="font-bold mb-1">ℹ️ Testnet Adapter Active</p>
                     <p>
-                        You are on <strong>Base Sepolia</strong>. Since LI.FI (liquidity provider) does not support this testnet, 
-                        the app is using a compatibility adapter to simulate the swap flow. 
+                        You are on <strong>Base Sepolia</strong>. 
+                        The app is using <strong>Across Protocol</strong> for cross-chain transfers.
                         Real swaps will occur automatically on Mainnet.
                     </p>
                  </div>
@@ -608,7 +848,7 @@ export default function DegenTempoDashboard() {
                         ≈ ${(parseFloat(totalBalance) * 3500).toFixed(2)} USD
                       </p>
 
-                      {/* Address Details (Simplified) */}
+                      {/* Address Details */}
                       <div className="mt-6 flex items-center justify-between rounded-lg bg-slate-950/30 p-3 border border-slate-800/50">
                         <span className="text-xs font-medium text-slate-500">Wallet Address</span>
                         <div className="flex items-center">
@@ -621,25 +861,13 @@ export default function DegenTempoDashboard() {
                         </div>
                       </div>
 
+                      {/* Gas Status (Replaces Smart Account Details) */}
                       <div className="mt-2 flex items-center justify-between rounded-lg bg-slate-950/30 p-3 border border-slate-800/50">
-                        <span className="text-xs font-medium text-slate-500">USDC Balance (Smart Account)</span>
+                        <span className="text-xs font-medium text-slate-500">Gas Status</span>
                         <div className="flex items-center">
-                            <span className="text-sm font-bold text-green-400 mr-2">
-                                {parseFloat(usdcBalance).toFixed(2)} USDC
+                            <span className="text-xs font-bold text-green-400 mr-2">
+                                Sponsored (Free)
                             </span>
-                        </div>
-                      </div>
-
-                      {/* Smart Account Address (Debug/Info) */}
-                      <div className="mt-2 flex items-center justify-between rounded-lg bg-slate-950/30 p-3 border border-slate-800/50">
-                        <span className="text-xs font-medium text-slate-500">Smart Account</span>
-                        <div className="flex items-center">
-                            <code className="text-xs text-blue-400 font-mono truncate mr-2 max-w-[200px]">
-                                {smartAccountAddress || "Loading..."}
-                            </code>
-                            <Button variant="ghost" size="icon" className="h-4 w-4 text-slate-600 hover:text-white" onClick={() => copyToClipboard(smartAccountAddress || "")}>
-                                <Copy className="h-3 w-3" />
-                            </Button>
                         </div>
                       </div>
 
@@ -698,9 +926,31 @@ export default function DegenTempoDashboard() {
                                         <span className="text-slate-400">Amount ({APP_TOKEN.symbol})</span>
                                         <span className="text-slate-400 font-medium">Total: {totalBalance}</span>
                                       </div>
-                                      <div className="flex justify-end gap-3 text-xs text-slate-500">
-                                          <span>Smart Acct: {parseFloat(stats?.balance || "0").toFixed(4)}</span>
-                                          <span>Signer: {parseFloat(signerBalance).toFixed(4)}</span>
+                                      
+                                      <div className="flex flex-col gap-1 text-xs text-slate-500 items-end border-t border-slate-800/50 pt-2 mt-1">
+                                            {/* Smart Account Info */}
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-slate-400">Smart Account (Bridge):</span>
+                                                <span 
+                                                    className="font-mono text-blue-400 cursor-pointer hover:text-blue-300 transition-colors" 
+                                                    onClick={() => copyToClipboard(smartAccountAddress || "")} 
+                                                    title="Click to copy Smart Account Address"
+                                                >
+                                                    {smartAccountAddress ? `${smartAccountAddress.slice(0, 6)}...${smartAccountAddress.slice(-4)}` : "Loading..."}
+                                                </span>
+                                                <span className="text-slate-600">|</span>
+                                                <span>Bal: {parseFloat(stats?.balance || "0").toFixed(4)}</span>
+                                            </div>
+
+                                            {/* EOA Info */}
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-slate-400">Connected Wallet (EOA):</span>
+                                                <span className="font-mono text-slate-300" title={activeWallet?.address}>
+                                                    {activeWallet?.address ? `${activeWallet.address.slice(0, 6)}...${activeWallet.address.slice(-4)}` : "Not Connected"}
+                                                </span>
+                                                <span className="text-slate-600">|</span>
+                                                <span>Bal: {parseFloat(signerBalance).toFixed(4)}</span>
+                                            </div>
                                       </div>
                                   </div>
                                   <div className="flex gap-2">
@@ -713,34 +963,91 @@ export default function DegenTempoDashboard() {
                                             setQuote(null); // Reset quote on change
                                           }}
                                       />
-                                      <Button variant="outline" className="border-slate-800 text-slate-400 hover:text-white" onClick={() => setAmount(stats?.balance || "0")}>
-                                          Max (Smart)
+                                      <Button variant="outline" className="border-slate-800 text-slate-400 hover:text-white" onClick={() => setAmount(signerBalance || "0")}>
+                                          Max (Signer)
                                       </Button>
                                   </div>
                               </div>
+
+                              {/* Dev Only: Direct Withdraw Button - HIDDEN
+                              {stats?.stripeAccountId && (
+                                  <div className="mb-4 pt-2">
+                                       <Button 
+                                          variant="outline" 
+                                          className="w-full border-purple-900/50 text-purple-400 hover:bg-purple-900/20"
+                                          onClick={handleWithdraw}
+                                          disabled={!amount || parseFloat(amount) <= 0}
+                                      >
+                                          Test Withdraw to Stripe (Direct)
+                                      </Button>
+                                      <p className="text-[10px] text-slate-500 text-center mt-1">
+                                           *Sends USDC directly to Treasury &rarr; Stripe Payout (Bypasses Bridge)
+                                       </p>
+                                  </div>
+                              )}
+                              */}
                               
                               {quote ? (
-                                <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4 space-y-2">
-                                    <div className="flex justify-between text-sm">
-                                        <span className="text-slate-400">Receive (Estimated):</span>
-                                        <span className="font-medium text-green-400">{formatUnits(BigInt(quote.toAmount), quote.toToken.decimals)} {quote.toToken.symbol}</span>
-                                    </div>
+                                      <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4 space-y-2">
+                                          <div className="flex justify-between text-sm">
+                                              <span className="text-slate-400">Receive (Estimated):</span>
+                                              <span className="font-medium text-green-400">
+                                                  {/* Fix: Prioritize expectedOutputAmount, fallback to outputAmount or 0 */}
+                                                  {formatUnits(BigInt(quote.expectedOutputAmount || quote.outputAmount || 0), 6)} USDC
+                                              </span>
+                                          </div>
                                     <div className="flex justify-between text-xs text-slate-500">
                                         <span>Route:</span>
-                                        <span>{quote.steps.map((s: any) => s.tool).join(' -> ')}</span>
+                                        <span>Across Protocol</span>
+                                    </div>
+                                    <div className="flex justify-between text-xs text-slate-500">
+                                        <span>Bridge Fee:</span>
+                                        <span>
+                                            {/* Fix: Check multiple fee fields (totalRelayerFee, fees.total, or calculate diff) */}
+                                            {quote.totalRelayerFee ? formatUnits(BigInt(quote.totalRelayerFee), 6) : 
+                                             (quote.fees?.total && (typeof quote.fees.total === 'string' || typeof quote.fees.total === 'number' || typeof quote.fees.total === 'bigint')) ? formatUnits(BigInt(quote.fees.total), 6) :
+                                             quote.inputAmount && quote.expectedOutputAmount ? 
+                                                formatUnits(BigInt(quote.inputAmount) - BigInt(quote.expectedOutputAmount), 6) :
+                                             "Unknown"} USDC
+                                        </span>
                                     </div>
                                     <div className="flex justify-between text-xs text-slate-500">
                                         <span>Gas Cost:</span>
                                         <span className="text-green-500">Sponsored (Free)</span>
                                     </div>
+                                    {BigInt(quote.expectedOutputAmount || quote.outputAmount || 0) === BigInt(0) && (
+                                        <div className="mt-2 rounded bg-red-900/20 p-2 text-xs text-red-400 border border-red-900/50">
+                                            Warning: Amount is too low to cover bridge fees. Please increase amount.
+                                        </div>
+                                    )}
+
                                     <Button 
                                       className="w-full mt-2 bg-blue-600 hover:bg-blue-700" 
                                       onClick={handleConvert}
-                                      disabled={!stats?.serviceEnabled}
+                                      disabled={!stats?.serviceEnabled || isSwapping}
                                     >
-                                      Confirm Swap
+                                      {isSwapping ? "Swapping..." : "Confirm Swap"}
                                       <ArrowRight className="ml-2 h-4 w-4" />
                                     </Button>
+                                    
+                                    {/* Approval Button Logic */}
+                                    {(needsApproval || (quote.approvalTxns && quote.approvalTxns.length > 0)) && (
+                                        <div className="absolute inset-0 bg-slate-900/90 flex items-center justify-center p-4 rounded-lg">
+                                            <div className="w-full space-y-3">
+                                                <div className="text-center">
+                                                    <p className="text-sm font-medium text-white mb-1">Approval Required</p>
+                                                    <p className="text-xs text-slate-400">Please approve USDC to continue</p>
+                                                </div>
+                                                <Button 
+                                                    className="w-full bg-yellow-600 hover:bg-yellow-700" 
+                                                    onClick={handleApprove}
+                                                    disabled={isApproving}
+                                                >
+                                                    {isApproving ? "Approving..." : "Approve USDC"}
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                               ) : (
                                 <Button 
@@ -769,7 +1076,7 @@ export default function DegenTempoDashboard() {
                                 {transactions.map((tx) => (
                                     <div key={tx.id} className="flex items-center justify-between border-b border-slate-800 pb-4 last:border-0">
                                         <div>
-                                            <p className="font-medium text-white">{tx.inputAmount} DEGEN</p>
+                                            <p className="font-medium text-white">{tx.inputAmount} {APP_TOKEN.symbol}</p>
                                             <p className="text-sm text-slate-400">{new Date(tx.createdAt).toLocaleString()}</p>
                                         </div>
                                         <div className="text-right">

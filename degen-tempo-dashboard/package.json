@@ -9,8 +9,8 @@
     "start": "next start"
   },
   "dependencies": {
+    "@across-protocol/app-sdk": "^0.4.4",
     "@hookform/resolvers": "^3.10.0",
-    "@lifi/sdk": "^3.14.1",
     "@prisma/client": "^6.19.1",
     "@privy-io/react-auth": "^3.9.1",
     "@radix-ui/react-accordion": "1.2.2",
@@ -69,7 +69,7 @@
     "tailwindcss-animate": "^1.0.7",
     "undici": "^7.16.0",
     "vaul": "^1.1.2",
-    "viem": "^2.43.2",
+    "viem": "^2.43.3",
     "zod": "3.25.76"
   },
   "devDependencies": {

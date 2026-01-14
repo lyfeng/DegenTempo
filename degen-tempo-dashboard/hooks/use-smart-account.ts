@@ -17,7 +17,7 @@ export function useSmartAccount() {
       if (!user) return;
       
       // Log for debugging
-      console.log("Initializing Smart Account...", { user, wallets });
+      // console.log("Initializing Smart Account...", { user, wallets });
 
       if (wallets.length === 0) {
         console.log("No wallets found yet.");
@@ -30,29 +30,38 @@ export function useSmartAccount() {
       const embeddedWallet = wallets.find((w) => w.walletClientType === 'privy');
       
       if (!embeddedWallet) {
-        console.log("Farcaster (Privy) wallet not found yet. Waiting for initialization...", wallets);
-        return;
+        // If no embedded wallet, try to use the first available wallet (e.g. MetaMask)
+        // This allows the app to work for users who login with external wallets
+        const externalWallet = wallets[0];
+        if (externalWallet) {
+             console.log("Embedded wallet not found, falling back to external wallet:", externalWallet.walletClientType);
+        } else {
+             console.log("No wallets found for Smart Account.");
+             return;
+        }
       }
       
-      console.log("Using wallet for Smart Account Signer:", { 
-          type: embeddedWallet.walletClientType, 
-          address: embeddedWallet.address 
-      });
+      const targetWallet = embeddedWallet || wallets[0];
 
-      console.log("Smart Account Config:", {
-        chainId: chain.id,
-        rpcUrl: rpcUrl,
-        policyId: process.env.NEXT_PUBLIC_ALCHEMY_POLICY_ID,
-        enablePaymaster: process.env.NEXT_PUBLIC_ENABLE_PAYMASTER
-      });
+      // console.log("Using wallet for Smart Account Signer:", { 
+      //     type: targetWallet.walletClientType, 
+      //     address: targetWallet.address 
+      // });
+
+      // console.log("Smart Account Config:", {
+      //   chainId: chain.id,
+      //   rpcUrl: rpcUrl,
+      //   policyId: process.env.NEXT_PUBLIC_ALCHEMY_POLICY_ID,
+      //   enablePaymaster: process.env.NEXT_PUBLIC_ENABLE_PAYMASTER
+      // });
 
       setLoading(true);
 
       try {
-        const provider = await embeddedWallet.getEthereumProvider();
+        const provider = await targetWallet.getEthereumProvider();
         
         const walletClient = createWalletClient({
-          account: embeddedWallet.address as `0x${string}`,
+          account: targetWallet.address as `0x${string}`,
           chain: chain,
           transport: custom(provider)
         });

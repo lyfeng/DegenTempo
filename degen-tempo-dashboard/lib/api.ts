@@ -1,10 +1,10 @@
 const API_BASE = '/api';
 
-export async function loginUser(fid: string, walletAddress: string) {
+export async function loginUser(fid: string, walletAddress: string, eoaAddress?: string) {
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fid, walletAddress }),
+    body: JSON.stringify({ fid, walletAddress, eoaAddress }),
   });
   return res.json();
 }

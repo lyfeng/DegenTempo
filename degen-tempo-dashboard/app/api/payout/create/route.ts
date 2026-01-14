@@ -27,6 +27,15 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Stripe account not connected' }, { status: 400 });
     }
 
+    // 0. Replay Protection: Check if this txHash has already been processed
+    const existingTx = await prisma.transaction.findFirst({
+        where: { baseTxHash: txHash }
+    });
+
+    if (existingTx) {
+        return NextResponse.json({ error: 'Transaction already processed' }, { status: 400 });
+    }
+
     // 1. Record the Payout Request
     const transaction = await prisma.transaction.create({
       data: {
@@ -37,7 +46,7 @@ export async function POST(request: Request) {
         feeAmount: 0, 
         outputAmount: parseFloat(amount),
         status: 'PROCESSING',
-        userOpHash: txHash || undefined
+        baseTxHash: txHash || undefined
       },
     });
 

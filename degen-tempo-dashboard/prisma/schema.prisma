@@ -13,7 +13,8 @@ datasource db {
 
 model User {
   id            Int      @id @default(autoincrement())
-  fid           String   @unique
+  fid           String?  @unique
+  eoaAddress    String?  @unique @map("eoa_address")
   walletAddress String?  @map("wallet_address")
   stripeAccountId String? @map("stripe_account_id")
   dailyGasLimit Decimal  @default(0) // Daily gas limit in USD or native token
@@ -36,7 +37,7 @@ model Transaction {
   outputAmount  Decimal // USDC
   
   // Chain Data
-  lifiTxId      String?  @unique
+  acrossDepositId String?  @unique
   baseTxHash    String?
   tempoTxHash   String?
   
